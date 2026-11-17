@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "author": "Anonymous maker",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot1", "top": -78.1, "left": -115.4, "attrs": {} },
+    {
+      "type": "wokwi-relay-module",
+      "id": "relay1",
+      "top": 255.8,
+      "left": -218,
+      "rotate": 90,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -61.2,
+      "left": 195.8,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 14.4,
+      "left": 124.25,
+      "rotate": 90,
+      "attrs": { "value": "1000" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "pot1:VCC", "esp:3V3", "red", [ "v0" ] ],
+    [ "pot1:GND", "esp:GND.1", "black", [ "v0" ] ],
+    [ "pot1:SIG", "esp:34", "green", [ "v0" ] ],
+    [ "relay1:VCC", "esp:5V", "red", [ "v-19.2", "h148.61" ] ],
+    [ "relay1:GND", "esp:GND.2", "black", [ "h-38.4", "v-355.2", "h293.16" ] ],
+    [ "esp:26", "relay1:IN", "green", [ "h0" ] ],
+    [ "led1:C", "r1:1", "green", [ "h-57.2", "v17.8" ] ],
+    [ "r1:2", "esp:GND.3", "green", [ "v9.8", "h302.66" ] ],
+    [ "led1:A", "esp:2", "green", [ "v182.4", "h-120.04" ] ]
+  ],
+  "dependencies": {}
+}
