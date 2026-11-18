@@ -3,7 +3,7 @@ import { db } from '@/lib/db';
 
 /**
  * PRD B-02: Endpoint GET /api/devices/{id}/status
- * Mengambil riwayat time-series dan status relay terkini untuk dashboard web
+ * Mengambil riwayat time-series dan status relay terkini dari database MySQL
  */
 export async function GET(
   request: NextRequest,
@@ -20,7 +20,7 @@ export async function GET(
       );
     }
 
-    const device = db.getDevice(deviceId);
+    const device = await db.getDevice(deviceId);
     if (!device) {
       return NextResponse.json(
         { success: false, error: `Perangkat dengan ID ${deviceId} tidak ditemukan.` },
@@ -31,9 +31,9 @@ export async function GET(
     const searchParams = request.nextUrl.searchParams;
     const limit = Number(searchParams.get('limit') || 30);
 
-    const history = db.getRecentTelemetries(deviceId, limit);
+    const history = await db.getRecentTelemetries(deviceId, limit);
     const latest = history.length > 0 ? history[history.length - 1] : null;
-    const stats = db.getStats(deviceId);
+    const stats = await db.getStats(deviceId);
 
     const isOverload = latest ? latest.power > device.max_power_limit : false;
 
@@ -55,7 +55,7 @@ export async function GET(
     });
   } catch (error: any) {
     return NextResponse.json(
-      { success: false, error: error?.message || 'Gagal memuat status perangkat.' },
+      { success: false, error: error?.message || 'Gagal memuat status perangkat dari MySQL.' },
       { status: 500 }
     );
   }

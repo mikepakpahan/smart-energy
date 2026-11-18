@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Next.js & Build outputs
+.next/
+*/.next/
+out/
+*/out/
+build/
+*/build/
+
+# Local databases, runtime storage & caches
+.data/
+*/.data/
+*.db
+*.sqlite
+*.log
+
+# Environment variables & secrets (keep .env.example)
+.env
+.env*.local
+.env.production
+*/.env
+*/.env*.local
+*/.env.production
+!.env.example
+!*/.env.example
+
+# PlatformIO / Firmware build & IDE
+firmware/.pio/
+firmware/.vscode/
+.vscode/
+
+# OS and temp files
+.DS_Store
+Thumbs.db

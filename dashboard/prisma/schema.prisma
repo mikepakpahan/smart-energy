@@ -1,8 +1,8 @@
 // Prisma Schema untuk Smart Energy Meter & AI Appliance Profiling (NILM)
-// Sesuai dengan spesifikasi PRD Section 5
+// Menggunakan MySQL database sesuai permintaan migrasi
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -13,6 +13,7 @@ generator client {
 model Device {
   id              Int           @id @default(autoincrement())
   name            String        @db.VarChar(255)
+  location        String?       @db.VarChar(255)
   max_power_limit Int           @default(500) // Batas daya aman (Watt)
   relay_status    Boolean       @default(true) // True = ON, False = OFF
   created_at      DateTime      @default(now())
@@ -26,9 +27,13 @@ model Telemetry {
   id                 BigInt    @id @default(autoincrement())
   device_id          Int
   device             Device    @relation(fields: [device_id], references: [id], onDelete: Cascade)
-  voltage            Decimal   @db.Decimal(5, 2) // Volt (misal 220.50 V)
+  voltage            Decimal   @db.Decimal(6, 2) // Volt (misal 220.50 V)
   power              Decimal   @db.Decimal(8, 2) // Daya aktif (misal 48.25 W)
-  detected_appliance String?   @db.VarChar(100) // Hasil klasifikasi AI NILM
+  current            Decimal   @db.Decimal(6, 3) // Arus (misal 0.218 A)
+  detected_appliance String?   @db.VarChar(150) // Hasil klasifikasi AI NILM
+  appliance_category String?   @db.VarChar(100)
+  confidence         Int?      @default(95)
+  is_overload        Boolean   @default(false)
   recorded_at        DateTime  @default(now())
 
   @@index([device_id, recorded_at(sort: Desc)])

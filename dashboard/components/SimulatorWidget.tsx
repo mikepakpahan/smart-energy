@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import IOSSwitch from './IOSSwitch';
 
 interface SimulatorWidgetProps {
@@ -33,6 +33,48 @@ export default function SimulatorWidget({
   const [isSending, setIsSending] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  // Storage & Pruning state
+  const [storageInfo, setStorageInfo] = useState<{
+    total_records: number;
+    retention_days: number;
+    estimated_size_kb: number;
+    auto_prune_status: string;
+  } | null>(null);
+  const [isPruning, setIsPruning] = useState(false);
+
+  const fetchStorageHealth = async () => {
+    try {
+      const res = await fetch('/api/telemetry/prune');
+      const json = await res.json();
+      if (json.success && json.data) {
+        setStorageInfo(json.data);
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    fetchStorageHealth();
+  }, []);
+
+  const handleManualPrune = async () => {
+    setIsPruning(true);
+    try {
+      const res = await fetch('/api/telemetry/prune', { method: 'POST' });
+      const json = await res.json();
+      if (json.success) {
+        setStatusMessage(json.message);
+        if (json.data?.storage_health) {
+          setStorageInfo(json.data.storage_health);
+        }
+        setTimeout(() => setStatusMessage(null), 3500);
+      }
+    } catch (err: any) {
+      alert(`Gagal menjalankan pruning: ${err.message}`);
+    } finally {
+      setIsPruning(false);
+    }
+  };
+
   const presets = [
     { id: 'standby', label: 'Standby', watt: '1 W' },
     { id: 'charger', label: 'Charger HP', watt: '12 W' },
@@ -48,6 +90,7 @@ export default function SimulatorWidget({
     await onSendCustomPower(sliderWatt);
     setIsSending(false);
     setStatusMessage(`Terkirim: ${sliderWatt} W.`);
+    fetchStorageHealth();
     setTimeout(() => setStatusMessage(null), 2500);
   };
 
@@ -56,6 +99,7 @@ export default function SimulatorWidget({
     await onSendPreset(presetId);
     setIsSending(false);
     setStatusMessage(`Preset ${wattStr} terkirim.`);
+    fetchStorageHealth();
     setTimeout(() => setStatusMessage(null), 2500);
   };
 
@@ -171,8 +215,8 @@ export default function SimulatorWidget({
         </div>
       </div>
 
-      {/* Settings Card: Limit & Manual Relay Override & Reset */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {/* Grid: Settings & Auto-Pruning Health */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Batas Proteksi */}
         <div className="rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 p-4 sm:p-5 shadow-xs transition-colors flex flex-col justify-between">
           <div>
@@ -215,7 +259,16 @@ export default function SimulatorWidget({
               Manual Relay Override
             </h4>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-              Status: {relayStatus ? <strong className="text-emerald-600 dark:text-emerald-400 font-semibold">ON (Mengalir)</strong> : <strong className="text-rose-600 dark:text-rose-400 font-semibold">OFF (Terputus)</strong>}
+              Status:{' '}
+              {relayStatus ? (
+                <strong className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                  ON (Mengalir)
+                </strong>
+              ) : (
+                <strong className="text-rose-600 dark:text-rose-400 font-semibold">
+                  OFF (Terputus)
+                </strong>
+              )}
             </p>
           </div>
 
@@ -225,6 +278,34 @@ export default function SimulatorWidget({
               onChange={onToggleRelay}
               ariaLabel="Manual Relay Override iOS Switch"
             />
+          </div>
+        </div>
+
+        {/* Kebijakan Penyimpanan & Auto-Pruning */}
+        <div className="rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 p-4 sm:p-5 shadow-xs transition-colors flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                Penyimpanan & Auto-Pruning
+              </h4>
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" title="Auto-Pruning Aktif" />
+            </div>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Total Baris: <strong className="font-mono text-zinc-800 dark:text-zinc-200">{storageInfo?.total_records ?? '...'}</strong> ({storageInfo?.estimated_size_kb ?? 0} KB)
+            </p>
+            <p className="text-[10px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+              Retensi: Otomatis pangkas data &gt; {storageInfo?.retention_days ?? 7} hari
+            </p>
+          </div>
+
+          <div className="mt-3">
+            <button
+              onClick={handleManualPrune}
+              disabled={isPruning}
+              className="w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 py-1.5 px-3 text-[11px] font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 active:scale-95 disabled:opacity-50 transition-all"
+            >
+              {isPruning ? 'Memangkas Data...' : 'Pangkas Data Usang Sekarang'}
+            </button>
           </div>
         </div>
       </div>

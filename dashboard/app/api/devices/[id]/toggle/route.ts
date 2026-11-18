@@ -3,7 +3,7 @@ import { db } from '@/lib/db';
 
 /**
  * PRD B-03: Endpoint POST /api/devices/{id}/toggle
- * Menangkap instruksi override saklar relay dari pengguna (ON/OFF)
+ * Menangkap instruksi override saklar relay dari pengguna (ON/OFF) ke MySQL
  */
 export async function POST(
   request: NextRequest,
@@ -20,7 +20,7 @@ export async function POST(
       );
     }
 
-    const device = db.getDevice(deviceId);
+    const device = await db.getDevice(deviceId);
     if (!device) {
       return NextResponse.json(
         { success: false, error: `Perangkat dengan ID ${deviceId} tidak ditemukan.` },
@@ -30,17 +30,16 @@ export async function POST(
 
     let nextStatus = !device.relay_status;
 
-    // Check optional body for explicit target status { relay_status: boolean }
     try {
       const body = await request.json();
       if (typeof body.relay_status === 'boolean') {
         nextStatus = body.relay_status;
       }
     } catch {
-      // Body is optional, default to toggle
+      // Body is optional
     }
 
-    const updatedDevice = db.updateRelay(deviceId, nextStatus);
+    const updatedDevice = await db.updateRelay(deviceId, nextStatus);
 
     return NextResponse.json({
       success: true,
@@ -53,7 +52,7 @@ export async function POST(
     });
   } catch (error: any) {
     return NextResponse.json(
-      { success: false, error: error?.message || 'Gagal mengubah status relay.' },
+      { success: false, error: error?.message || 'Gagal mengubah status relay di MySQL.' },
       { status: 500 }
     );
   }

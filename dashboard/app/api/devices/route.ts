@@ -3,7 +3,7 @@ import { db } from '@/lib/db';
 
 export async function GET() {
   try {
-    const devices = db.getAllDevices();
+    const devices = await db.getAllDevices();
     return NextResponse.json({
       success: true,
       data: devices,

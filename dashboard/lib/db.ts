@@ -1,66 +1,113 @@
-import fs from 'fs';
-import path from 'path';
+import mysql from 'mysql2/promise';
 import { Device, Telemetry, DeviceStats } from '@/types/energy';
 import { classifyAppliance } from './nilm';
-
-const DATA_DIR = path.join(process.cwd(), '.data');
-const STORE_FILE = path.join(DATA_DIR, 'energy-store.json');
 
 // Tarif Dasar Listrik PLN Golongan R-1/TR (1300 VA - 2200 VA) per kWh (Rp)
 const TARIF_PLN_PER_KWH = 1444.70;
 
-interface StoreData {
-  devices: Device[];
-  telemetries: Telemetry[];
-  nextTelemetryId: number;
+// Batas retensi standar data telemetri (hari)
+const DEFAULT_RETENTION_DAYS = Number(process.env.RETENTION_DAYS) || 7;
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '1234',
+  database: process.env.DB_NAME || 'smart_energy_db',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+export interface StorageHealthInfo {
+  total_records: number;
+  retention_days: number;
+  oldest_record: string | null;
+  newest_record: string | null;
+  estimated_size_kb: number;
+  auto_prune_status: string;
 }
 
-// In-Memory cache fallback & persistence
-class EnergyDatabase {
-  private store: StoreData;
-  private initialized: boolean = false;
+class MySQLDatabase {
+  private isSeeded: boolean = false;
+  private lastPruneTimestamp: number = 0;
+  // Interval eksekusi auto-pruning otomatis di layer aplikasi (setiap 1 jam)
+  private pruneIntervalMs: number = 60 * 60 * 1000;
 
-  constructor() {
-    this.store = this.loadInitialStore();
-  }
-
-  private ensureDataDir() {
+  private async ensureTables() {
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS devices (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          location VARCHAR(255) NULL,
+          max_power_limit INT NOT NULL DEFAULT 500,
+          relay_status BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS telemetries (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          device_id INT NOT NULL,
+          voltage DECIMAL(6,2) NOT NULL,
+          power DECIMAL(8,2) NOT NULL,
+          current DECIMAL(6,3) NOT NULL,
+          detected_appliance VARCHAR(150) NULL,
+          appliance_category VARCHAR(100) NULL,
+          confidence INT NULL DEFAULT 95,
+          is_overload BOOLEAN NOT NULL DEFAULT FALSE,
+          recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_device_recorded (device_id, recorded_at DESC),
+          CONSTRAINT fk_telemetries_device FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      const [rows]: any = await pool.query('SELECT id FROM devices WHERE id = 1');
+      if (rows.length === 0) {
+        await pool.query(`
+          INSERT INTO devices (id, name, location, max_power_limit, relay_status)
+          VALUES (1, 'Stopkontak Utama (Lab IoT)', 'Laboratorium Sistem Mikrokontroler', 500, 1)
+        `);
       }
-    } catch {
-      // Ignore if cannot write to disk, in-memory works fine
+    } catch (err) {
+      console.error('Gagal memastikan skema tabel MySQL:', err);
     }
   }
 
-  private saveToDisk() {
+  private async ensureSeedData(deviceId: number = 1) {
+    if (this.isSeeded) return;
     try {
-      this.ensureDataDir();
-      fs.writeFileSync(STORE_FILE, JSON.stringify(this.store, null, 2), 'utf-8');
-    } catch {
-      // In-memory will still function
-    }
+      await this.ensureTables();
+      const [countRows]: any = await pool.query(
+        'SELECT COUNT(*) as total FROM telemetries WHERE device_id = ?',
+        [deviceId]
+      );
+      if (countRows[0]?.total === 0) {
+        await this.generateSeedTelemetries(deviceId);
+      }
+      this.isSeeded = true;
+    } catch {}
   }
 
-  private generateSeedTelemetries(deviceId: number): Telemetry[] {
-    const records: Telemetry[] = [];
+  private async generateSeedTelemetries(deviceId: number) {
     const now = Date.now();
-    const intervalMs = 2000; // 2 detik per data sesuai PRD H-01
+    const intervalMs = 2000;
     const count = 30;
-
-    // Pola simulasi beban: Standby -> Kipas Angin berputar -> Sedikit fluktuasi
     let currentPower = 12.0;
 
     for (let i = count - 1; i >= 0; i--) {
-      const timestamp = new Date(now - i * intervalMs).toISOString();
+      const timestamp = new Date(now - i * intervalMs);
+      const mysqlDate = timestamp.toISOString().slice(0, 19).replace('T', ' ');
 
       if (i > 20) {
-        currentPower = 10 + Math.random() * 4; // Idle / Charger
+        currentPower = 10 + Math.random() * 4;
       } else if (i > 10) {
-        currentPower = 48 + Math.random() * 6; // Kipas Angin
+        currentPower = 48 + Math.random() * 6;
       } else {
-        currentPower = 52 + Math.sin(i) * 5; // Kipas Angin stabil
+        currentPower = 52 + Math.sin(i) * 5;
       }
 
       const voltage = +(220 + (Math.random() * 2 - 1)).toFixed(2);
@@ -68,133 +115,189 @@ class EnergyDatabase {
       const current = +(power / voltage).toFixed(3);
       const classification = classifyAppliance(power, power - 1, true);
 
-      records.push({
-        id: count - i,
-        device_id: deviceId,
-        voltage,
-        power,
-        current,
-        detected_appliance: classification.detected_appliance,
-        appliance_category: classification.category,
-        confidence: classification.confidence,
-        is_overload: power > 500,
-        recorded_at: timestamp,
-      });
+      await pool.query(
+        `INSERT INTO telemetries (device_id, voltage, power, current, detected_appliance, appliance_category, confidence, is_overload, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          deviceId,
+          voltage,
+          power,
+          current,
+          classification.detected_appliance,
+          classification.category,
+          classification.confidence,
+          power > 500 ? 1 : 0,
+          mysqlDate,
+        ]
+      );
     }
-
-    return records;
   }
 
-  private loadInitialStore(): StoreData {
-    try {
-      if (fs.existsSync(STORE_FILE)) {
-        const fileContent = fs.readFileSync(STORE_FILE, 'utf-8');
-        const parsed = JSON.parse(fileContent);
-        if (parsed.devices && parsed.telemetries) {
-          return parsed;
-        }
-      }
-    } catch {
-      // Fallback to fresh seed
-    }
-
-    const defaultDevice: Device = {
-      id: 1,
-      name: 'Stopkontak Utama (Lab IoT)',
-      location: 'Laboratorium Sistem Mikrokontroler',
-      max_power_limit: 500, // Batas aman 500 Watt
-      relay_status: true,   // ON
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  public async getDevice(id: number): Promise<Device | null> {
+    await this.ensureSeedData(id);
+    const [rows]: any = await pool.query('SELECT * FROM devices WHERE id = ? LIMIT 1', [id]);
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      location: row.location || undefined,
+      max_power_limit: row.max_power_limit,
+      relay_status: Boolean(row.relay_status),
+      created_at: new Date(row.created_at).toISOString(),
+      updated_at: new Date(row.updated_at).toISOString(),
     };
+  }
 
-    const initialTelemetries = this.generateSeedTelemetries(defaultDevice.id);
+  public async getAllDevices(): Promise<Device[]> {
+    await this.ensureSeedData(1);
+    const [rows]: any = await pool.query('SELECT * FROM devices ORDER BY id ASC');
+    return rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      location: row.location || undefined,
+      max_power_limit: row.max_power_limit,
+      relay_status: Boolean(row.relay_status),
+      created_at: new Date(row.created_at).toISOString(),
+      updated_at: new Date(row.updated_at).toISOString(),
+    }));
+  }
 
-    const initialData: StoreData = {
-      devices: [defaultDevice],
-      telemetries: initialTelemetries,
-      nextTelemetryId: initialTelemetries.length + 1,
+  public async updateRelay(deviceId: number, relayStatus: boolean): Promise<Device | null> {
+    await pool.query('UPDATE devices SET relay_status = ?, updated_at = NOW() WHERE id = ?', [
+      relayStatus ? 1 : 0,
+      deviceId,
+    ]);
+    return this.getDevice(deviceId);
+  }
+
+  public async updateMaxLimit(deviceId: number, maxLimit: number): Promise<Device | null> {
+    await pool.query('UPDATE devices SET max_power_limit = ?, updated_at = NOW() WHERE id = ?', [
+      maxLimit,
+      deviceId,
+    ]);
+    return this.getDevice(deviceId);
+  }
+
+  /**
+   * Fungsi Auto-Pruning:
+   * Menghapus rekaman telemetri yang lebih tua dari batas retensi (default: 7 hari).
+   * Mencegah database membengkak seiring aliran data 2 detik terus berjalan.
+   */
+  public async pruneOldTelemetries(retentionDays: number = DEFAULT_RETENTION_DAYS): Promise<{
+    deletedRows: number;
+    retentionDays: number;
+    timestamp: string;
+  }> {
+    const days = Math.max(1, retentionDays);
+    const [result]: any = await pool.query(
+      'DELETE FROM telemetries WHERE recorded_at < NOW() - INTERVAL ? DAY',
+      [days]
+    );
+
+    const deletedRows = Number(result?.affectedRows || 0);
+    this.lastPruneTimestamp = Date.now();
+
+    return {
+      deletedRows,
+      retentionDays: days,
+      timestamp: new Date().toISOString(),
     };
-
-    try {
-      this.ensureDataDir();
-      fs.writeFileSync(STORE_FILE, JSON.stringify(initialData, null, 2), 'utf-8');
-    } catch {}
-
-    return initialData;
   }
 
-  public getDevice(id: number): Device | null {
-    return this.store.devices.find((d) => d.id === id) || null;
+  /**
+   * Mengambil status statistik ukuran dan kesehatan tabel telemetri
+   */
+  public async getStorageHealth(deviceId: number = 1): Promise<StorageHealthInfo> {
+    await this.ensureSeedData(deviceId);
+    const [rows]: any = await pool.query(`
+      SELECT 
+        COUNT(*) as total_records,
+        MIN(recorded_at) as oldest_record,
+        MAX(recorded_at) as newest_record
+      FROM telemetries
+    `);
+
+    const total = Number(rows[0]?.total_records || 0);
+    // Rata-rata 1 baris telemetri InnoDB + index adalah ~200 bytes
+    const estimatedKb = Math.round((total * 200) / 1024);
+
+    return {
+      total_records: total,
+      retention_days: DEFAULT_RETENTION_DAYS,
+      oldest_record: rows[0]?.oldest_record ? new Date(rows[0].oldest_record).toISOString() : null,
+      newest_record: rows[0]?.newest_record ? new Date(rows[0].newest_record).toISOString() : null,
+      estimated_size_kb: estimatedKb,
+      auto_prune_status: 'Aktif (Otomatis pangkas data > 7 hari)',
+    };
   }
 
-  public getAllDevices(): Device[] {
-    return this.store.devices;
-  }
-
-  public updateRelay(deviceId: number, relayStatus: boolean): Device | null {
-    const device = this.getDevice(deviceId);
-    if (!device) return null;
-
-    device.relay_status = relayStatus;
-    device.updated_at = new Date().toISOString();
-    this.saveToDisk();
-    return device;
-  }
-
-  public updateMaxLimit(deviceId: number, maxLimit: number): Device | null {
-    const device = this.getDevice(deviceId);
-    if (!device) return null;
-
-    device.max_power_limit = maxLimit;
-    device.updated_at = new Date().toISOString();
-    this.saveToDisk();
-    return device;
-  }
-
-  public addTelemetry(payload: {
+  public async addTelemetry(payload: {
     device_id: number;
     voltage: number;
     power: number;
     current?: number;
-  }): { telemetry: Telemetry; device: Device; is_cutoff_triggered: boolean } {
-    let device = this.getDevice(payload.device_id);
+  }): Promise<{ telemetry: Telemetry; device: Device; is_cutoff_triggered: boolean }> {
+    let device = await this.getDevice(payload.device_id);
     if (!device) {
-      // Auto-create default device if not exist
-      device = {
-        id: payload.device_id,
-        name: `Stopkontak Device #${payload.device_id}`,
-        max_power_limit: 500,
-        relay_status: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      this.store.devices.push(device);
+      await pool.query(
+        'INSERT INTO devices (id, name, max_power_limit, relay_status) VALUES (?, ?, ?, ?)',
+        [payload.device_id, `Stopkontak Device #${payload.device_id}`, 500, 1]
+      );
+      device = (await this.getDevice(payload.device_id))!;
     }
 
     const voltage = +payload.voltage.toFixed(2);
-    // Jika relay mati, daya yang mengalir ke stopkontak harus 0
     const power = device.relay_status ? +payload.power.toFixed(2) : 0;
     const current = payload.current !== undefined
       ? +payload.current.toFixed(3)
       : voltage > 0 ? +(power / voltage).toFixed(3) : 0;
 
-    const recent = this.getRecentTelemetries(payload.device_id, 1);
+    const recent = await this.getRecentTelemetries(payload.device_id, 1);
     const prevPower = recent.length > 0 ? recent[0].power : power;
 
     const classification = classifyAppliance(power, prevPower, device.relay_status);
     const isOverload = power > device.max_power_limit;
     let isCutoffTriggered = false;
 
-    // Hard-cutoff / Auto-protection: jika overload, saklar diputus otomatis
     if (isOverload && device.relay_status) {
+      await pool.query('UPDATE devices SET relay_status = 0, updated_at = NOW() WHERE id = ?', [
+        payload.device_id,
+      ]);
       device.relay_status = false;
-      device.updated_at = new Date().toISOString();
       isCutoffTriggered = true;
     }
 
+    const recordedAt = new Date();
+    const mysqlDate = recordedAt.toISOString().slice(0, 19).replace('T', ' ');
+
+    const [insertResult]: any = await pool.query(
+      `INSERT INTO telemetries (device_id, voltage, power, current, detected_appliance, appliance_category, confidence, is_overload, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        payload.device_id,
+        voltage,
+        power,
+        current,
+        classification.detected_appliance,
+        classification.category,
+        classification.confidence,
+        isOverload ? 1 : 0,
+        mysqlDate,
+      ]
+    );
+
+    // Cek berkala: Jika sudah melewati interval pruning (1 jam), jalankan auto-pruning di background
+    const now = Date.now();
+    if (now - this.lastPruneTimestamp > this.pruneIntervalMs) {
+      this.lastPruneTimestamp = now;
+      this.pruneOldTelemetries().catch((err) =>
+        console.error('Auto-pruning background task error:', err)
+      );
+    }
+
     const newTelemetry: Telemetry = {
-      id: this.store.nextTelemetryId++,
+      id: insertResult.insertId,
       device_id: payload.device_id,
       voltage,
       power,
@@ -203,17 +306,8 @@ class EnergyDatabase {
       appliance_category: classification.category,
       confidence: classification.confidence,
       is_overload: isOverload,
-      recorded_at: new Date().toISOString(),
+      recorded_at: recordedAt.toISOString(),
     };
-
-    this.store.telemetries.push(newTelemetry);
-
-    // Keep history manageable (last 300 records in storage)
-    if (this.store.telemetries.length > 500) {
-      this.store.telemetries = this.store.telemetries.slice(-300);
-    }
-
-    this.saveToDisk();
 
     return {
       telemetry: newTelemetry,
@@ -222,13 +316,31 @@ class EnergyDatabase {
     };
   }
 
-  public getRecentTelemetries(deviceId: number, limit: number = 30): Telemetry[] {
-    const list = this.store.telemetries.filter((t) => t.device_id === deviceId);
-    return list.slice(-limit);
+  public async getRecentTelemetries(deviceId: number, limit: number = 30): Promise<Telemetry[]> {
+    await this.ensureSeedData(deviceId);
+    const [rows]: any = await pool.query(
+      `SELECT * FROM (
+        SELECT * FROM telemetries WHERE device_id = ? ORDER BY id DESC LIMIT ?
+      ) sub ORDER BY id ASC`,
+      [deviceId, limit]
+    );
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      device_id: row.device_id,
+      voltage: Number(row.voltage),
+      power: Number(row.power),
+      current: Number(row.current),
+      detected_appliance: row.detected_appliance,
+      appliance_category: row.appliance_category,
+      confidence: row.confidence,
+      is_overload: Boolean(row.is_overload),
+      recorded_at: new Date(row.recorded_at).toISOString(),
+    }));
   }
 
-  public getStats(deviceId: number): DeviceStats {
-    const history = this.getRecentTelemetries(deviceId, 60);
+  public async getStats(deviceId: number): Promise<DeviceStats> {
+    const history = await this.getRecentTelemetries(deviceId, 60);
     const latest = history[history.length - 1];
 
     if (!latest) {
@@ -253,9 +365,6 @@ class EnergyDatabase {
     });
 
     const avgPower = +(sumPower / history.length).toFixed(2);
-    
-    // Perhitungan akumulasi energi: (avgPower * durasi estimasi jam) / 1000
-    // Asumsi riwayat merepresentasikan 2 detik per poin data
     const durationHours = (history.length * 2) / 3600;
     const energyKwh = +((avgPower * durationHours) / 1000).toFixed(4);
     const costIdr = Math.round(energyKwh * TARIF_PLN_PER_KWH);
@@ -266,29 +375,26 @@ class EnergyDatabase {
       current_amperage: latest.current,
       peak_power_today: peakPower,
       avg_power_today: avgPower,
-      energy_kwh: Math.max(0.0125, energyKwh), // Minimal base nilai realistis demo
+      energy_kwh: Math.max(0.0125, energyKwh),
       cost_idr: Math.max(18, costIdr),
       total_records: history.length,
     };
   }
 
-  public resetDemoData(deviceId: number = 1): void {
-    const device = this.getDevice(deviceId);
-    if (device) {
-      device.relay_status = true;
-      device.max_power_limit = 500;
-    }
-    this.store.telemetries = this.generateSeedTelemetries(deviceId);
-    this.saveToDisk();
+  public async resetDemoData(deviceId: number = 1): Promise<void> {
+    await pool.query('UPDATE devices SET relay_status = 1, max_power_limit = 500 WHERE id = ?', [
+      deviceId,
+    ]);
+    await pool.query('DELETE FROM telemetries WHERE device_id = ?', [deviceId]);
+    await this.generateSeedTelemetries(deviceId);
   }
 }
 
-// Global singleton instance for Next.js hot-reloads
 declare global {
-  var __energyDbInstance: EnergyDatabase | undefined;
+  var __mySqlDbInstance: MySQLDatabase | undefined;
 }
 
-export const db = global.__energyDbInstance || new EnergyDatabase();
+export const db = global.__mySqlDbInstance || new MySQLDatabase();
 if (process.env.NODE_ENV !== 'production') {
-  global.__energyDbInstance = db;
+  global.__mySqlDbInstance = db;
 }

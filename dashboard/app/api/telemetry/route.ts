@@ -4,7 +4,7 @@ import { db } from '@/lib/db';
 /**
  * PRD B-01: Endpoint POST /api/telemetry
  * Menerima aliran data sensor (ESP32/PZEM-004T atau Simulator Wokwi)
- * Menjalankan klasifikasi AI NILM dan proteksi overload
+ * Menjalankan klasifikasi AI NILM dan proteksi overload ke database MySQL
  */
 export async function POST(request: NextRequest) {
   try {
@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = db.addTelemetry({
+    const result = await db.addTelemetry({
       device_id: Number(device_id),
       voltage: numVoltage,
       power: numPower,
@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
         success: true,
         message: result.is_cutoff_triggered
           ? '⚠️ Overload terdeteksi! Proteksi Hard-Cutoff relay diaktifkan.'
-          : 'Data telemetri berhasil direkam dan diproses NILM.',
+          : 'Data telemetri berhasil direkam ke MySQL dan diproses NILM.',
         data: {
           telemetry: result.telemetry,
           device: result.device,
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error?.message || 'Gagal memproses data telemetri.',
+        error: error?.message || 'Gagal memproses data telemetri ke MySQL.',
       },
       { status: 500 }
     );
@@ -72,7 +72,7 @@ export async function GET(request: NextRequest) {
     const deviceId = Number(searchParams.get('device_id') || 1);
     const limit = Number(searchParams.get('limit') || 30);
 
-    const telemetries = db.getRecentTelemetries(deviceId, limit);
+    const telemetries = await db.getRecentTelemetries(deviceId, limit);
     return NextResponse.json({
       success: true,
       count: telemetries.length,

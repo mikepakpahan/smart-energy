@@ -18,7 +18,7 @@ export async function POST(
       );
     }
 
-    const updated = db.updateMaxLimit(deviceId, Number(max_power_limit));
+    const updated = await db.updateMaxLimit(deviceId, Number(max_power_limit));
     if (!updated) {
       return NextResponse.json(
         { success: false, error: 'Perangkat tidak ditemukan.' },

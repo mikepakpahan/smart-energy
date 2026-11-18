@@ -12,10 +12,10 @@ export async function POST(request: NextRequest) {
     const { device_id = 1, action, preset, custom_power } = body;
 
     if (action === 'reset') {
-      db.resetDemoData(Number(device_id));
+      await db.resetDemoData(Number(device_id));
       return NextResponse.json({
         success: true,
-        message: 'Data riwayat simulasi berhasil direset ke status awal.',
+        message: 'Data riwayat simulasi di database MySQL berhasil direset ke status awal.',
       });
     }
 
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const result = db.addTelemetry({
+    const result = await db.addTelemetry({
       device_id: Number(device_id),
       voltage: +voltage.toFixed(2),
       power: +power.toFixed(2),
@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Simulasi terkirim: ${power}W (${result.telemetry.detected_appliance})`,
+      message: `Simulasi terkirim ke MySQL: ${power}W (${result.telemetry.detected_appliance})`,
       data: result,
     });
   } catch (error: any) {
