@@ -5,9 +5,9 @@
       "name": "Stopkontak Utama (Lab IoT)",
       "location": "Laboratorium Sistem Mikrokontroler",
       "max_power_limit": 500,
-      "relay_status": true,
+      "relay_status": false,
       "created_at": "2026-11-18T07:02:02.068Z",
-      "updated_at": "2026-11-18T08:12:46.476Z"
+      "updated_at": "2026-11-18T08:18:26.098Z"
     }
   ],
   "telemetries": [
