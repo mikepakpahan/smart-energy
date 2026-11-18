@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Device {
+  id            String       @id @default(cuid())
+  deviceId      String       @unique // ID dari ESP32, misal "esp32-01"
+  name          String?
+  maxPowerLimit Float        @default(500) // Watt
+  relayStatus   Boolean      @default(true) // true = ON, false = OFF/trip
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  telemetries   Telemetry[]
+
+  @@map("devices")
+}
+
+model Telemetry {
+  id           Int      @id @default(autoincrement())
+  deviceId     String   // FK ke Device.deviceId
+  voltage      Float
+  power        Float
+  relayStatus  Boolean  @default(true)
+  appliance    String?  // hasil klasifikasi NILM
+  createdAt    DateTime @default(now())
+
+  device       Device   @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+
+  @@index([deviceId, createdAt(sort: Desc)])
+  @@map("telemetries")
+}
