@@ -34,6 +34,7 @@ services:
   smart-energy-dashboard-dev:
     image: smart-energy/dashboard:dev
     container_name: smart-energy-dashboard-dev
+    pull_policy: build
     restart: unless-stopped
     build:
       context: ./dashboard
