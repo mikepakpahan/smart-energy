@@ -15,7 +15,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-1234}
       MYSQL_DATABASE: ${DB_NAME:-smart_energy_db}
     ports:
-      - "${DB_PORT:-3307}:3307"
+      - "${DB_PORT:-3307}:3306"
     volumes:
       - smart-energy-mysql-data:/var/lib/mysql
       - ./dashboard/prisma/init_mysql.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
