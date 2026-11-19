@@ -1,75 +1,184 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "config.h"
 
-// Konfigurasi Pin
-const int SIMULATOR_PIN = 34; // Potensiometer simulasi Daya (Watt)
-const int RELAY_PIN = 26;     // Relay pemutus arus stopkontak
-const int LED_PIN = 2;        // Indikator status aman (Bawaan ESP32)
+// =============================================================================
+// VARIABEL STATUS SISTEM
+// =============================================================================
+unsigned long lastSendTime = 0;
+bool isRelayActive = true;
+bool isLocalOverload = false;
 
-// Variabel Timer (Non-Blocking) pengganti delay()
-unsigned long previousMillis = 0;
-const long interval = 2000; // Frekuensi baca sensor (setiap 2 detik)
+// =============================================================================
+// FUNGSI KONTROL RELAY & INDIKATOR LED
+// =============================================================================
+void setRelayState(bool state, const char* reason) {
+  if (state == isRelayActive) return; // Tidak ada perubahan status
 
-// Konfigurasi Batas Keamanan
-const float MAX_POWER_WATT = 500.0; // Batas pemutusan arus
-bool isCutoff = false;
-
-void setup() {
-  Serial.begin(115200);
-  
-  // Inisialisasi Pin
-  pinMode(SIMULATOR_PIN, INPUT);
-  pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
-
-  // Kondisi awal: Listrik Mengalir 
-  // (Relay Module biasanya Active Low, nilai LOW berarti saklar tertutup/ON)
-  digitalWrite(RELAY_PIN, LOW); 
-  digitalWrite(LED_PIN, HIGH);
-  
-  Serial.println("==================================");
-  Serial.println("Sistem Monitoring Energi Dimulai");
-  Serial.println("Batas Aman: " + String(MAX_POWER_WATT) + " W");
-  Serial.println("==================================");
+  isRelayActive = state;
+  if (isRelayActive) {
+    digitalWrite(PIN_RELAY, RELAY_STATE_ON);
+    digitalWrite(PIN_LED_STATUS, HIGH);
+    Serial.printf("\n[RELAY] 🔌 SAKLAR MENYALA (ON) - Alasan: %s\n", reason);
+  } else {
+    digitalWrite(PIN_RELAY, RELAY_STATE_OFF);
+    digitalWrite(PIN_LED_STATUS, LOW);
+    Serial.printf("\n[RELAY] ⚠️ SAKLAR DIPUTUS (OFF) - Alasan: %s\n", reason);
+  }
 }
 
-void loop() {
-  unsigned long currentMillis = millis();
+// =============================================================================
+// FUNGSI PENGHUBUNG WI-FI WOKWI
+// =============================================================================
+void connectWiFi() {
+  Serial.print("[WIFI] Menghubungkan ke access point: ");
+  Serial.println(WIFI_SSID);
 
-  // Task 1: Baca Sensor dan Proteksi (Eksekusi setiap 2 detik)
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    // Baca sensor potensiometer (ADC ESP32 beresolusi 12-bit: 0 - 4095)
-    int rawADC = analogRead(SIMULATOR_PIN);
-    
-    // Petakan nilai ADC ke rentang daya 0 - 1000 Watt
-    float currentPower = map(rawADC, 0, 4095, 0, 1000);
-
-    Serial.print("[DATA] Daya Saat Ini: ");
-    Serial.print(currentPower);
-    Serial.println(" W");
-
-    // Logika Pemutusan Arus Otomatis (Cut-off)
-    if (currentPower > MAX_POWER_WATT && !isCutoff) {
-      Serial.println("⚠️ BAHAYA: Beban Lebih! Memutus stopkontak...");
-      digitalWrite(RELAY_PIN, HIGH); // Putus arus
-      digitalWrite(LED_PIN, LOW);    // Matikan indikator
-      isCutoff = true;
-      
-      // TODO: Disini tempat menaruh fungsi HTTP POST / MQTT Publish ke Laravel
-      // kirimNotifikasiKeBackend("OVERLOAD", currentPower);
-      
-    } else if (currentPower <= MAX_POWER_WATT && isCutoff) {
-      Serial.println("✅ Beban Normal. Mengalirkan listrik kembali...");
-      digitalWrite(RELAY_PIN, LOW); // Alirkan arus
-      digitalWrite(LED_PIN, HIGH);  // Nyalakan indikator
-      isCutoff = false;
-      
-      // kirimNotifikasiKeBackend("NORMAL", currentPower);
-    }
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
   }
 
-  // Task 2: Tempat untuk listener MQTT atau request API
-  // Berada di luar blok if(currentMillis...), sehingga dieksekusi jutaan kali 
-  // per detik tanpa terblokir oleh proses baca sensor di atas.
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WIFI] ✅ Terhubung!");
+    Serial.print("[WIFI] IP Address ESP32: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n[WIFI] ❌ Gagal terhubung ke Wi-Fi. Mode offline aktif.");
+  }
+}
+
+// =============================================================================
+// FUNGSI PENGIRIMAN TELEMETRI KE REST API DASHBOARD
+// =============================================================================
+void sendTelemetryData(float voltage, float power, float current) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[HTTP] Wi-Fi terputus. Mencoba rekoneksi...");
+    WiFi.reconnect();
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(BACKEND_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(3000); // 3 detik timeout
+
+  // Buat payload JSON
+  JsonDocument doc;
+  doc["device_id"] = DEVICE_ID;
+  doc["voltage"]   = voltage;
+  doc["power"]     = isRelayActive ? power : 0.0f; // Jika relay mati, daya teralirkan = 0W
+  doc["current"]   = isRelayActive ? current : 0.0f;
+
+  String jsonPayload;
+  serializeJson(doc, jsonPayload);
+
+  Serial.println("--------------------------------------------------");
+  Serial.printf("[HTTP POST] Mengirim ke %s\n", BACKEND_URL);
+  Serial.printf("[PAYLOAD] %s\n", jsonPayload.c_str());
+
+  int httpCode = http.POST(jsonPayload);
+
+  if (httpCode > 0) {
+    String responseString = http.getString();
+    Serial.printf("[HTTP %d] Respon Diterima (%d bytes)\n", httpCode, responseString.length());
+
+    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+      JsonDocument resDoc;
+      DeserializationError err = deserializeJson(resDoc, responseString);
+
+      if (!err) {
+        bool serverRelayStatus = resDoc["data"]["device"]["relay_status"] | true;
+        const char* actionRequired = resDoc["data"]["action_required"] | "NONE";
+        const char* detectedAppliance = resDoc["data"]["telemetry"]["detected_appliance"] | "Tidak Teridentifikasi";
+        int confidence = resDoc["data"]["telemetry"]["confidence"] | 0;
+
+        Serial.printf("[AI NILM] Perangkat Terdeteksi: %s (%d%%)\n", detectedAppliance, confidence);
+
+        // Sinkronisasi status saklar dari Server / AI NILM
+        if (strcmp(actionRequired, "RELAY_CUTOFF") == 0 || !serverRelayStatus) {
+          setRelayState(false, "SERVER_AUTO_CUTOFF / USER_REMOTE_OFF");
+        } else if (serverRelayStatus && !isLocalOverload) {
+          setRelayState(true, "SERVER_CONFIRMED_ON");
+        }
+      }
+    }
+  } else {
+    Serial.printf("[HTTP ERROR] Gagal mengirim data. Error code: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+  Serial.println("--------------------------------------------------");
+}
+
+// =============================================================================
+// SETUP SISTEM
+// =============================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("\n==================================================");
+  Serial.println("⚡ SMART ENERGY METER - WOKWI SIMULATOR FIRMWARE");
+  Serial.println("==================================================");
+
+  // Inisialisasi I/O
+  pinMode(PIN_POTENTIOMETER, INPUT);
+  pinMode(PIN_RELAY, OUTPUT);
+  pinMode(PIN_LED_STATUS, OUTPUT);
+
+  // Kondisi Awal: Relay ON (Listrik Mengalir), LED Menyala
+  digitalWrite(PIN_RELAY, RELAY_STATE_ON);
+  digitalWrite(PIN_LED_STATUS, HIGH);
+  isRelayActive = true;
+
+  // Sambungkan ke jaringan Wi-Fi Wokwi
+  connectWiFi();
+
+  Serial.println("[SISTEM] Firmware siap beroperasi.");
+  Serial.println("Gunakan potensiometer di diagram Wokwi untuk mengubah beban daya (0 - 1000W).");
+}
+
+// =============================================================================
+// MAIN LOOP
+// =============================================================================
+void loop() {
+  // 1. Baca sensor potensiometer (ADC 12-bit: 0 - 4095)
+  int rawADC = analogRead(PIN_POTENTIOMETER);
+
+  // Petakan ADC ke rentang daya aktif 0 - 1000 Watt
+  float measuredPower = (float)rawADC * (1000.0f / 4095.0f);
+  measuredPower = round(measuredPower * 10.0f) / 10.0f; // 1 desimal
+
+  // Simulasi variasi tegangan PLN (219.0V - 221.0V)
+  float voltage = DEFAULT_VOLTAGE + ((float)(random(-10, 11)) / 10.0f);
+
+  // Hitung kuat arus listrik (I = P / V)
+  float current = (voltage > 0) ? (measuredPower / voltage) : 0.0f;
+
+  // 2. Proteksi Fail-Safe Lokal (Edge Overload Protection)
+  if (measuredPower > LOCAL_OVERLOAD_LIMIT) {
+    if (!isLocalOverload) {
+      isLocalOverload = true;
+      setRelayState(false, "LOCAL_FAILSAFE_OVERLOAD (> 500W)");
+    }
+  } else {
+    isLocalOverload = false;
+  }
+
+  // 3. Pengiriman Telemetri Terjadwal (Non-blocking setiap 2 detik)
+  unsigned long now = millis();
+  if (now - lastSendTime >= SEND_INTERVAL) {
+    lastSendTime = now;
+    sendTelemetryData(voltage, measuredPower, current);
+  }
+
+  delay(50); // Mencegah watchdog timeout
 }
