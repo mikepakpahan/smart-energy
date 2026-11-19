@@ -1,0 +1,25 @@
+# ==============================================================================
+# Smart Energy Dashboard - Development Dockerfile
+# Base: Node.js 20 on Alpine Linux (Hot Reloading / Fast Iteration)
+# ==============================================================================
+
+FROM node:20-alpine
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Salin manifest dependensi terlebih dahulu untuk memanfaatkan Docker layer caching
+COPY package.json package-lock.json ./
+RUN npm install
+
+# Salin sisa file aplikasi
+COPY . .
+
+ENV NODE_ENV=development
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+# Polling watchpack agar sinkronisasi file di Windows/WSL/macOS bind mounts instan
+ENV WATCHPACK_POLLING=true
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev"]
